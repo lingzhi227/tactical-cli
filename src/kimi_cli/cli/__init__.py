@@ -1,0 +1,768 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+from typing import Annotated, Literal
+
+import typer
+
+from kimi_cli.constant import VERSION
+
+from .info import cli as info_cli
+from .mcp import cli as mcp_cli
+from .web import cli as web_cli
+
+
+class Reload(Exception):
+    """Reload configuration."""
+
+    def __init__(self, session_id: str | None = None):
+        super().__init__("reload")
+        self.session_id = session_id
+
+
+class SwitchToWeb(Exception):
+    """Switch to web interface."""
+
+    def __init__(self, session_id: str | None = None):
+        super().__init__("switch_to_web")
+        self.session_id = session_id
+
+
+cli = typer.Typer(
+    epilog="""\b\
+Documentation:        https://moonshotai.github.io/kimi-cli/\n
+LLM friendly version: https://moonshotai.github.io/kimi-cli/llms.txt""",
+    add_completion=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+    help="Kimi, your next CLI agent.",
+)
+
+UIMode = Literal["shell", "print", "acp", "wire"]
+InputFormat = Literal["text", "stream-json"]
+OutputFormat = Literal["text", "stream-json"]
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"kimi, version {VERSION}")
+        raise typer.Exit()
+
+
+@cli.callback(invoke_without_command=True)
+def kimi(
+    ctx: typer.Context,
+    # Meta
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Show version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            help="Print verbose information. Default: no.",
+        ),
+    ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            help="Log debug information. Default: no.",
+        ),
+    ] = False,
+    # Basic configuration
+    local_work_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--work-dir",
+            "-w",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            writable=True,
+            help="Working directory for the agent. Default: current directory.",
+        ),
+    ] = None,
+    session_id: Annotated[
+        str | None,
+        typer.Option(
+            "--session",
+            "-S",
+            help="Session ID to resume for the working directory. Default: new session.",
+        ),
+    ] = None,
+    continue_: Annotated[
+        bool,
+        typer.Option(
+            "--continue",
+            "-C",
+            help="Continue the previous session for the working directory. Default: no.",
+        ),
+    ] = False,
+    config_string: Annotated[
+        str | None,
+        typer.Option(
+            "--config",
+            help="Config TOML/JSON string to load. Default: none.",
+        ),
+    ] = None,
+    config_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--config-file",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Config TOML/JSON file to load. Default: ~/.kimi/config.toml.",
+        ),
+    ] = None,
+    model_name: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            "-m",
+            help="LLM model to use. Default: default model set in config file.",
+        ),
+    ] = None,
+    thinking: Annotated[
+        bool | None,
+        typer.Option(
+            "--thinking/--no-thinking",
+            help="Enable thinking mode. Default: default thinking mode set in config file.",
+        ),
+    ] = None,
+    # Run mode
+    yolo: Annotated[
+        bool,
+        typer.Option(
+            "--yolo",
+            "--yes",
+            "-y",
+            "--auto-approve",
+            help="Automatically approve all actions. Default: no.",
+        ),
+    ] = False,
+    prompt: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt",
+            "-p",
+            "--command",
+            "-c",
+            help="User prompt to the agent. Default: prompt interactively.",
+        ),
+    ] = None,
+    print_mode: Annotated[
+        bool,
+        typer.Option(
+            "--print",
+            help=(
+                "Run in print mode (non-interactive). Note: print mode implicitly adds `--yolo`."
+            ),
+        ),
+    ] = False,
+    acp_mode: Annotated[
+        bool,
+        typer.Option(
+            "--acp",
+            help="(Deprecated, use `kimi acp` instead) Run as ACP server.",
+        ),
+    ] = False,
+    wire_mode: Annotated[
+        bool,
+        typer.Option(
+            "--wire",
+            help="Run as Wire server (experimental).",
+        ),
+    ] = False,
+    input_format: Annotated[
+        InputFormat | None,
+        typer.Option(
+            "--input-format",
+            help=(
+                "Input format to use. Must be used with `--print` "
+                "and the input must be piped in via stdin. "
+                "Default: text."
+            ),
+        ),
+    ] = None,
+    output_format: Annotated[
+        OutputFormat | None,
+        typer.Option(
+            "--output-format",
+            help="Output format to use. Must be used with `--print`. Default: text.",
+        ),
+    ] = None,
+    final_message_only: Annotated[
+        bool,
+        typer.Option(
+            "--final-message-only",
+            help="Only print the final assistant message (print UI).",
+        ),
+    ] = False,
+    quiet: Annotated[
+        bool,
+        typer.Option(
+            "--quiet",
+            help="Alias for `--print --output-format text --final-message-only`.",
+        ),
+    ] = False,
+    # Customization
+    agent: Annotated[
+        Literal["default", "okabe"] | None,
+        typer.Option(
+            "--agent",
+            help="Builtin agent specification to use. Default: builtin default agent.",
+        ),
+    ] = None,
+    agent_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--agent-file",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Custom agent specification file. Default: builtin default agent.",
+        ),
+    ] = None,
+    mcp_config_file: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--mcp-config-file",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help=(
+                "MCP config file to load. Add this option multiple times to specify multiple MCP "
+                "configs. Default: none."
+            ),
+        ),
+    ] = None,
+    mcp_config: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--mcp-config",
+            help=(
+                "MCP config JSON to load. Add this option multiple times to specify multiple MCP "
+                "configs. Default: none."
+            ),
+        ),
+    ] = None,
+    local_skills_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--skills-dir",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            help="Path to the skills directory. Overrides discovery.",
+        ),
+    ] = None,
+    # Loop control
+    max_steps_per_turn: Annotated[
+        int | None,
+        typer.Option(
+            "--max-steps-per-turn",
+            min=1,
+            help="Maximum number of steps in one turn. Default: from config.",
+        ),
+    ] = None,
+    max_retries_per_step: Annotated[
+        int | None,
+        typer.Option(
+            "--max-retries-per-step",
+            min=1,
+            help="Maximum number of retries in one step. Default: from config.",
+        ),
+    ] = None,
+    max_ralph_iterations: Annotated[
+        int | None,
+        typer.Option(
+            "--max-ralph-iterations",
+            min=-1,
+            help=(
+                "Extra iterations after the first turn in Ralph mode. Use -1 for unlimited. "
+                "Default: from config."
+            ),
+        ),
+    ] = None,
+):
+    """Kimi, your next CLI agent."""
+    if ctx.invoked_subcommand is not None:
+        return  # skip rest if a subcommand is invoked
+
+    del version  # handled in the callback
+
+    from kaos.path import KaosPath
+
+    from kimi_cli.agentspec import DEFAULT_AGENT_FILE, OKABE_AGENT_FILE
+    from kimi_cli.app import KimiCLI, enable_logging
+    from kimi_cli.config import Config, load_config_from_string
+    from kimi_cli.exception import ConfigError
+    from kimi_cli.metadata import load_metadata, save_metadata
+    from kimi_cli.session import Session
+    from kimi_cli.utils.logging import logger, open_original_stderr, redirect_stderr_to_logger
+
+    from .mcp import get_global_mcp_config_file
+
+    # Don't redirect stderr yet. Our stderr redirector replaces fd=2 with a pipe, which
+    # would swallow Click/Typer startup errors (e.g. config parsing / BadParameter).
+    # We re-enable stderr redirection after KimiCLI.create() succeeds.
+    enable_logging(debug, redirect_stderr=False)
+
+    def _emit_fatal_error(message: str) -> None:
+        # Prefer writing to the original stderr fd even if we later redirect fd=2.
+        # This ensures fatal errors are visible to the user.
+        with open_original_stderr() as stream:
+            if stream is not None:
+                stream.write((message.rstrip() + "\n").encode("utf-8", errors="replace"))
+                stream.flush()
+                return
+        typer.echo(message, err=True)
+
+    if session_id is not None:
+        session_id = session_id.strip()
+        if not session_id:
+            raise typer.BadParameter("Session ID cannot be empty", param_hint="--session")
+
+    if quiet:
+        if acp_mode or wire_mode:
+            raise typer.BadParameter(
+                "Quiet mode cannot be combined with ACP or Wire UI",
+                param_hint="--quiet",
+            )
+        if output_format not in (None, "text"):
+            raise typer.BadParameter(
+                "Quiet mode implies `--output-format text`",
+                param_hint="--quiet",
+            )
+        print_mode = True
+        output_format = "text"
+        final_message_only = True
+
+    conflict_option_sets = [
+        {
+            "--print": print_mode,
+            "--acp": acp_mode,
+            "--wire": wire_mode,
+        },
+        {
+            "--agent": agent is not None,
+            "--agent-file": agent_file is not None,
+        },
+        {
+            "--continue": continue_,
+            "--session": session_id is not None,
+        },
+        {
+            "--config": config_string is not None,
+            "--config-file": config_file is not None,
+        },
+    ]
+    for option_set in conflict_option_sets:
+        active_options = [flag for flag, active in option_set.items() if active]
+        if len(active_options) > 1:
+            raise typer.BadParameter(
+                f"Cannot combine {', '.join(active_options)}.",
+                param_hint=active_options[0],
+            )
+
+    if agent is not None:
+        match agent:
+            case "default":
+                agent_file = DEFAULT_AGENT_FILE
+            case "okabe":
+                agent_file = OKABE_AGENT_FILE
+
+    ui: UIMode = "shell"
+    if print_mode:
+        ui = "print"
+    elif acp_mode:
+        ui = "acp"
+    elif wire_mode:
+        ui = "wire"
+
+    if prompt is not None:
+        prompt = prompt.strip()
+        if not prompt:
+            raise typer.BadParameter("Prompt cannot be empty", param_hint="--prompt")
+
+    if input_format is not None and ui != "print":
+        raise typer.BadParameter(
+            "Input format is only supported for print UI",
+            param_hint="--input-format",
+        )
+    if output_format is not None and ui != "print":
+        raise typer.BadParameter(
+            "Output format is only supported for print UI",
+            param_hint="--output-format",
+        )
+    if final_message_only and ui != "print":
+        raise typer.BadParameter(
+            "Final-message-only output is only supported for print UI",
+            param_hint="--final-message-only",
+        )
+
+    config: Config | Path | None = None
+    if config_string is not None:
+        config_string = config_string.strip()
+        if not config_string:
+            raise typer.BadParameter("Config cannot be empty", param_hint="--config")
+        try:
+            config = load_config_from_string(config_string)
+        except ConfigError as e:
+            raise typer.BadParameter(str(e), param_hint="--config") from e
+    elif config_file is not None:
+        config = config_file
+
+    file_configs = list(mcp_config_file or [])
+    raw_mcp_config = list(mcp_config or [])
+
+    # Use default MCP config file if no MCP config is provided
+    if not file_configs:
+        default_mcp_file = get_global_mcp_config_file()
+        if default_mcp_file.exists():
+            file_configs.append(default_mcp_file)
+
+    try:
+        mcp_configs = [json.loads(conf.read_text(encoding="utf-8")) for conf in file_configs]
+    except json.JSONDecodeError as e:
+        raise typer.BadParameter(f"Invalid JSON: {e}", param_hint="--mcp-config-file") from e
+
+    try:
+        mcp_configs += [json.loads(conf) for conf in raw_mcp_config]
+    except json.JSONDecodeError as e:
+        raise typer.BadParameter(f"Invalid JSON: {e}", param_hint="--mcp-config") from e
+
+    skills_dir: KaosPath | None = None
+    if local_skills_dir is not None:
+        skills_dir = KaosPath.unsafe_from_local_path(local_skills_dir)
+
+    work_dir = KaosPath.unsafe_from_local_path(local_work_dir) if local_work_dir else KaosPath.cwd()
+
+    async def _run(session_id: str | None) -> tuple[Session, bool]:
+        """
+        Create/load session and run the CLI instance.
+
+        Returns:
+            The session and whether the run succeeded.
+        """
+        if session_id is not None:
+            session = await Session.find(work_dir, session_id)
+            if session is None:
+                logger.info(
+                    "Session {session_id} not found, creating new session", session_id=session_id
+                )
+                session = await Session.create(work_dir, session_id)
+            logger.info("Switching to session: {session_id}", session_id=session.id)
+        elif continue_:
+            session = await Session.continue_(work_dir)
+            if session is None:
+                raise typer.BadParameter(
+                    "No previous session found for the working directory",
+                    param_hint="--continue",
+                )
+            logger.info("Continuing previous session: {session_id}", session_id=session.id)
+        else:
+            session = await Session.create(work_dir)
+            logger.info("Created new session: {session_id}", session_id=session.id)
+
+        instance = await KimiCLI.create(
+            session,
+            config=config,
+            model_name=model_name,
+            thinking=thinking,
+            yolo=yolo or (ui == "print"),  # print mode implies yolo
+            agent_file=agent_file,
+            mcp_configs=mcp_configs,
+            skills_dir=skills_dir,
+            max_steps_per_turn=max_steps_per_turn,
+            max_retries_per_step=max_retries_per_step,
+            max_ralph_iterations=max_ralph_iterations,
+        )
+        # Install stderr redirection only after initialization succeeded, so runtime
+        # stderr noise is captured into logs without hiding startup failures.
+        redirect_stderr_to_logger()
+        try:
+            match ui:
+                case "shell":
+                    succeeded = await instance.run_shell(prompt)
+                case "print":
+                    succeeded = await instance.run_print(
+                        input_format or "text",
+                        output_format or "text",
+                        prompt,
+                        final_only=final_message_only,
+                    )
+                case "acp":
+                    if prompt is not None:
+                        logger.warning("ACP server ignores prompt argument")
+                    await instance.run_acp()
+                    succeeded = True
+                case "wire":
+                    if prompt is not None:
+                        logger.warning("Wire server ignores prompt argument")
+                    await instance.run_wire_stdio()
+                    succeeded = True
+        except Reload as e:
+            if e.session_id is None:
+                raise Reload(session_id=session.id) from e
+            raise
+
+        return session, succeeded
+
+    async def _post_run(last_session: Session, succeeded: bool) -> None:
+        if not succeeded:
+            return
+
+        metadata = load_metadata()
+
+        # Update work_dir metadata with last session
+        work_dir_meta = metadata.get_work_dir_meta(last_session.work_dir)
+
+        if work_dir_meta is None:
+            logger.warning(
+                "Work dir metadata missing when marking last session, recreating: {work_dir}",
+                work_dir=last_session.work_dir,
+            )
+            work_dir_meta = metadata.new_work_dir_meta(last_session.work_dir)
+
+        if last_session.is_empty():
+            logger.info(
+                "Session {session_id} has empty context, removing it",
+                session_id=last_session.id,
+            )
+            await last_session.delete()
+            if work_dir_meta.last_session_id == last_session.id:
+                work_dir_meta.last_session_id = None
+        else:
+            work_dir_meta.last_session_id = last_session.id
+
+        save_metadata(metadata)
+
+    async def _reload_loop(session_id: str | None) -> bool:
+        """
+        Returns:
+            True if should switch to web interface, False otherwise.
+        """
+        while True:
+            try:
+                last_session, succeeded = await _run(session_id)
+                break
+            except Reload as e:
+                session_id = e.session_id
+                continue
+            except SwitchToWeb as e:
+                if e.session_id is not None:
+                    session = await Session.find(work_dir, e.session_id)
+                    if session is not None:
+                        await _post_run(session, True)
+                return True
+        await _post_run(last_session, succeeded)
+        return False
+
+    try:
+        switch_to_web = asyncio.run(_reload_loop(session_id))
+    except (typer.BadParameter, typer.Exit):
+        # Let Typer/Click format these errors (rich panel + correct exit code).
+        raise
+    except Exception as exc:
+        import click
+
+        if isinstance(exc, click.ClickException):
+            # ClickException includes the errors Typer knows how to render; don't
+            # wrap them, or we'd lose the standard error UI and exit codes.
+            raise
+        logger.exception("Fatal error when running CLI")
+        if debug:
+            import traceback
+
+            # In debug mode, show full traceback for quick diagnosis.
+            _emit_fatal_error(traceback.format_exc())
+        else:
+            from kimi_cli.share import get_share_dir
+
+            log_path = get_share_dir() / "logs" / "kimi.log"
+            # In non-debug mode, print a concise error and point users to logs.
+            _emit_fatal_error(f"{exc}\nSee logs: {log_path}")
+        raise typer.Exit(code=1) from exc
+    if switch_to_web:
+        from kimi_cli.utils.logging import restore_stderr
+
+        restore_stderr()
+
+        # Restore default SIGINT handler and terminal state after the shell's
+        # asyncio.run() to ensure Ctrl+C works in the uvicorn web server.
+        import signal
+
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+
+        from kimi_cli.utils.term import ensure_tty_sane
+
+        ensure_tty_sane()
+
+        from kimi_cli.web.app import run_web_server
+
+        run_web_server(open_browser=True)
+
+
+cli.add_typer(info_cli, name="info")
+
+
+@cli.command()
+def login(
+    json: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit OAuth events as JSON lines.",
+    ),
+) -> None:
+    """Login to your Kimi account."""
+    from rich.console import Console
+    from rich.status import Status
+
+    from kimi_cli.auth.oauth import login_kimi_code
+    from kimi_cli.config import load_config
+
+    async def _run() -> bool:
+        if json:
+            ok = True
+            async for event in login_kimi_code(load_config()):
+                typer.echo(event.json)
+                if event.type == "error":
+                    ok = False
+            return ok
+
+        console = Console()
+        ok = True
+        status: Status | None = None
+        try:
+            async for event in login_kimi_code(load_config()):
+                if event.type == "waiting":
+                    if status is None:
+                        status = console.status("Waiting for user authorization...")
+                        status.start()
+                    continue
+                if status is not None:
+                    status.stop()
+                    status = None
+                match event.type:
+                    case "error":
+                        style = "red"
+                    case "success":
+                        style = "green"
+                    case _:
+                        style = None
+                console.print(event.message, markup=False, style=style)
+                if event.type == "error":
+                    ok = False
+        finally:
+            if status is not None:
+                status.stop()
+        return ok
+
+    ok = asyncio.run(_run())
+    if not ok:
+        raise typer.Exit(code=1)
+
+
+@cli.command()
+def logout(
+    json: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit OAuth events as JSON lines.",
+    ),
+) -> None:
+    """Logout from your Kimi account."""
+    from rich.console import Console
+
+    from kimi_cli.auth.oauth import logout_kimi_code
+    from kimi_cli.config import load_config
+
+    async def _run() -> bool:
+        ok = True
+        if json:
+            async for event in logout_kimi_code(load_config()):
+                typer.echo(event.json)
+                if event.type == "error":
+                    ok = False
+            return ok
+
+        console = Console()
+        async for event in logout_kimi_code(load_config()):
+            match event.type:
+                case "error":
+                    style = "red"
+                case "success":
+                    style = "green"
+                case _:
+                    style = None
+            console.print(event.message, markup=False, style=style)
+            if event.type == "error":
+                ok = False
+        return ok
+
+    ok = asyncio.run(_run())
+    if not ok:
+        raise typer.Exit(code=1)
+
+
+@cli.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def term(
+    ctx: typer.Context,
+) -> None:
+    """Run Toad TUI backed by Kimi Code CLI ACP server."""
+    from .toad import run_term
+
+    run_term(ctx)
+
+
+@cli.command()
+def acp():
+    """Run Kimi Code CLI ACP server."""
+    from kimi_cli.acp import acp_main
+
+    acp_main()
+
+
+@cli.command(name="__web-worker", hidden=True)
+def web_worker(session_id: str) -> None:
+    """Run web worker subprocess (internal)."""
+    from uuid import UUID
+
+    from kimi_cli.app import enable_logging
+    from kimi_cli.web.runner.worker import run_worker
+
+    try:
+        parsed_session_id = UUID(session_id)
+    except ValueError as exc:
+        raise typer.BadParameter(f"Invalid session ID: {session_id}") from exc
+
+    enable_logging(debug=False)
+    asyncio.run(run_worker(parsed_session_id))
+
+
+cli.add_typer(mcp_cli, name="mcp")
+cli.add_typer(web_cli, name="web")
+
+
+if __name__ == "__main__":
+    if "kimi_cli.cli" not in sys.modules:
+        sys.modules["kimi_cli.cli"] = sys.modules[__name__]
+
+    sys.exit(cli())

@@ -1,0 +1,170 @@
+# Slash Commands
+
+Slash commands are built-in commands for Kimi Code CLI, used to control sessions, configuration, and debugging. Enter a command starting with `/` in the input box to trigger.
+
+::: tip Shell mode
+Some slash commands are also available in shell mode, including `/help`, `/exit`, `/version`, `/changelog`, and `/feedback`.
+:::
+
+## Help and info
+
+### `/help`
+
+Display help information. Shows keyboard shortcuts, all available slash commands, and loaded skills in a fullscreen pager. Press `q` to exit.
+
+Aliases: `/h`, `/?`
+
+### `/version`
+
+Display Kimi Code CLI version number.
+
+### `/changelog`
+
+Display the changelog for recent versions.
+
+Alias: `/release-notes`
+
+### `/feedback`
+
+Open the GitHub Issues page to submit feedback.
+
+## Account and configuration
+
+### `/login`
+
+Log in or configure an API platform. After execution, first select a platform:
+
+- **Kimi Code**: Automatically opens a browser for OAuth authorization
+- **Other platforms**: Enter an API key, then select an available model
+
+After configuration, settings are automatically saved to `~/.kimi/config.toml` and reloaded. See [Providers](../configuration/providers.md) for details.
+
+Alias: `/setup`
+
+::: tip
+This command is only available when using the default configuration file. If a configuration was specified via `--config` or `--config-file`, this command cannot be used.
+:::
+
+### `/logout`
+
+Log out from the current platform. This clears stored credentials and removes related configuration from the config file. After logout, Kimi Code CLI will automatically reload the configuration.
+
+### `/model`
+
+Switch models and thinking mode.
+
+This command first refreshes the available models list from the API platform. When called without arguments, displays an interactive selection interface where you first select a model, then choose whether to enable thinking mode (if the model supports it).
+
+After selection, Kimi Code CLI will automatically update the configuration file and reload.
+
+::: tip
+This command is only available when using the default configuration file. If a configuration was specified via `--config` or `--config-file`, this command cannot be used.
+:::
+
+### `/reload`
+
+Reload the configuration file without exiting Kimi Code CLI.
+
+### `/debug`
+
+Display debug information for the current context, including:
+- Number of messages and tokens
+- Number of checkpoints
+- Complete message history
+
+Debug information is displayed in a pager, press `q` to exit.
+
+### `/usage`
+
+Display API usage and quota information, showing quota usage with progress bars and remaining percentages.
+
+Aliases: `/status`
+
+::: tip
+This command only works with the Kimi Code platform.
+:::
+
+### `/mcp`
+
+Display currently connected MCP servers and loaded tools. See [Model Context Protocol](../customization/mcp.md) for details.
+
+Output includes:
+- Server connection status (green indicates connected)
+- List of tools provided by each server
+
+## Session management
+
+### `/sessions`
+
+List all sessions in the current working directory, allowing switching to other sessions.
+
+Alias: `/resume`
+
+Use arrow keys to select a session, press `Enter` to confirm switch, press `Ctrl-C` to cancel.
+
+### `/clear`
+
+Clear the current session's context and start a new conversation.
+
+Alias: `/reset`
+
+### `/compact`
+
+Manually compact the context to reduce token usage.
+
+When the context is too long, Kimi Code CLI will automatically trigger compaction. This command allows manually triggering the compaction process.
+
+## Skills
+
+### `/skill:<name>`
+
+Load a specific skill, sending the `SKILL.md` content to the Agent as a prompt. This command works for both standard skills and flow skills.
+
+For example:
+
+- `/skill:code-style`: Load code style guidelines
+- `/skill:pptx`: Load PPT creation workflow
+- `/skill:git-commits fix user login issue`: Load the skill with an additional task description
+
+You can append additional text after the command, which will be added to the skill prompt. See [Agent Skills](../customization/skills.md) for details.
+
+::: tip
+Flow skills can also be invoked via `/skill:<name>`, which loads the content as a standard skill without automatically executing the flow. To execute the flow, use `/flow:<name>` instead.
+:::
+
+### `/flow:<name>`
+
+Execute a specific flow skill. Flow skills embed an Agent Flow diagram in `SKILL.md`. After execution, the Agent will start from the `BEGIN` node and process each node according to the flow diagram definition until reaching the `END` node.
+
+For example:
+
+- `/flow:code-review`: Execute code review workflow
+- `/flow:release`: Execute release workflow
+
+::: tip
+Flow skills can also be invoked via `/skill:<name>`, which loads the content as a standard skill without automatically executing the flow.
+:::
+
+See [Agent Skills](../customization/skills.md#flow-skills) for details.
+
+## Others
+
+### `/init`
+
+Analyze the current project and generate an `AGENTS.md` file.
+
+This command starts a temporary sub-session to analyze the codebase structure and generate a project description document, helping the Agent better understand the project.
+
+### `/yolo`
+
+Toggle YOLO mode. When enabled, all operations are automatically approved and a yellow YOLO badge appears in the status bar; enter the command again to disable.
+
+::: warning Note
+YOLO mode skips all confirmations. Make sure you understand the potential risks.
+:::
+
+## Command completion
+
+After typing `/` in the input box, a list of available commands is automatically displayed. Continue typing to filter commands with fuzzy matching support, press Enter to select.
+
+For example, typing `/ses` will match `/sessions`, and `/clog` will match `/changelog`. Command aliases are also supported, such as typing `/h` to match `/help`.
